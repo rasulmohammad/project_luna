@@ -153,3 +153,9 @@ main().catch(console.error);
 //       at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
 //       at async main (file:///Users/rasulmohammad/Desktop/personal_projects/project_luna/backend-rag/project-luna/injest.mjs:129:26)
 //   ❌ Final upsert failed.
+
+// packages: project_luna/backend-rag/project-luna
+// ├── csv-parser@3.2.0
+// ├── dotenv@17.2.3
+// ├── hono@4.9.9
+// └── wrangler@4.42.0
