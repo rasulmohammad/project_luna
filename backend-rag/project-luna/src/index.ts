@@ -1,51 +1,31 @@
 import { Hono } from "hono";
 
-interface AIEmbeddingInput {
-  text: string | string[];
-}
-
 interface VectorQueryResult {
   id: string;
   score: number;
   values: number[];
   metadata: {
-      text: string;
-      source: string;
+    text: string;
+    source?: string;
   };
 }
 
 interface VectorizeIndex {
   query: (
-      vector: number[],
-      options: {
-          topK: number;
-          filter?: Record<string, unknown>;
-          returnValues?: boolean; // Set to true to get vectors back
-          returnMetadata?: boolean; // Set to true to get metadata back
-      }
+    vector: number[],
+    options: {
+      topK: number;
+      returnMetadata?: boolean;
+    }
   ) => Promise<{ matches: VectorQueryResult[] }>;
 }
 
-interface Message {
-  role: "user" | "system" | "assistant" | "tool";
-  content: string;
-}
-
-// Define the input structure for a chat model call
-interface AITextGenerationInput {
-  messages: Message[];
-  // Include other potential optional parameters common to LLMs
-  stream?: boolean;
-  max_tokens?: number;
-}
-
 interface Env {
-  // 1. Define the AI binding with a more precise run signature.
   AI: {
     run: (
       model: string,
-      inputs: AIEmbeddingInput | AITextGenerationInput | Record<string, unknown>
-    ) => Promise<{ response: string; embedding: number[] } | Record<string, unknown>>;
+      input: { text?: string; messages?: { role: string; content: string }[]; max_tokens?: number }
+    ) => Promise<any>;
   };
   VECTOR_INDEX: VectorizeIndex;
   ASSETS: Fetcher;
@@ -53,67 +33,108 @@ interface Env {
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.get("/message", (c) => {
-  return c.text("Hello World!");
-});
+app.get("/message", (c) => c.text("Hello World!"));
 
-app.get("/hello-ai", async (c) => {
-  const results = await c.env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-    messages: [
-      {"role":"user", "content":"Explain what NASA is in two sentences."}
-    ]
-  })
-  return c.json(results);
-});
+// Main RAG endpoint
+app.post("/rag", async (c) => {
+  try {
+    // 1️⃣ Parse JSON body
+    const body = await c.req.json<{ question?: string }>();
+    const userQuery = body.question?.trim();
+    if (!userQuery) return c.json({ error: "Missing 'question' in request body" }, 400);
 
-app.get("/rag", async (c) => {
-  const userQuery = "Summarize what these articles are about."
+    console.log("Using query:", body);
 
-  const embeddingResponse  =await c.env.AI.run(
-    "@cf/baai/bge-base-en-v1.5",
-    {text:userQuery}
-  ) as {embedding: number[]};
+    // 2️⃣ Generate embedding using Cloudflare AI
+    const embeddingRaw = await c.env.AI.run("@cf/baai/bge-base-en-v1.5", { text: userQuery });
+    console.log("Raw embedding response:", embeddingRaw);
 
-  if (!embeddingResponse.embedding) {
-    return c.json({error: "Failed to create embedding for the query."}, 500)
-  }
+    // 3️⃣ Extract embedding vector from possible response shapes
+    const queryVector: number[] | undefined =
+      Array.isArray((embeddingRaw as any).embedding)
+        ? (embeddingRaw as any).embedding
+        : Array.isArray((embeddingRaw as any).result?.embedding)
+        ? (embeddingRaw as any).result.embedding
+        : Array.isArray((embeddingRaw as any).data?.[0])
+        ? (embeddingRaw as any).data[0]
+        : undefined;
 
-  const queryVector = embeddingResponse.embedding;
+    if (!queryVector) return c.json({ error: "Failed to create embedding for the query." }, 500);
 
-  const searchResults = await c.env.VECTOR_INDEX.query(queryVector, {
-    topK: 5,
-    returnMetadata: true,
-  });
+    console.log("Query vector length:", queryVector.length);
 
-  const context = searchResults.matches
-  .map(match => match.metadata.text)
-  .join("\n---\n");
-
-  if (!context) {
-    return c.json({response: `I coulnd't find any specific information related to "${userQuery}" in my knowledge base`})
-  }
-
-  const systemInstruction =
-  `You are a helpful assistant powering a space biology knowledge engine. Use the following context to answer the user's question. 
-        If you cannot find the answer in the context, clearly state that the answer is not available in the provided data. 
-        Context:
-        ---
-        ${context}
-        ---`;
-
-        const llmResponse = await c.env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
-          messages: [
-              { role: "system", content: systemInstruction },
-              { role: "user", content: userQuery }
-          ],
-          max_tokens: 512,
-      }) as { response: string };
-
-      return c.json({
-        query: userQuery,
-        context_chunks: searchResults.matches.map(m => ({ text: m.metadata.text, score: m.score })),
-        final_answer: llmResponse.response.trim(),
+    // 4️⃣ Query the Vectorize index
+    const searchResults = await c.env.VECTOR_INDEX.query(queryVector, {
+      topK: 5,
+      returnMetadata: true,
     });
+
+    const contextChunks = searchResults.matches.map((m) => m.metadata.text).join("\n---\n");
+
+    if (!contextChunks)
+      return c.json({
+        response: `I couldn't find any relevant info for "${userQuery}" in the knowledge base.`,
+      });
+
+    // 5️⃣ Prepare system prompt for LLM
+    const systemInstruction = `
+You are a helpful assistant powering a space biology knowledge engine.
+Use the context below to answer the user's question.
+If the answer is not present, clearly state that it is unavailable.
+Context:
+---
+${contextChunks}
+---
+`;
+
+    // 6️⃣ Generate final answer with LLM
+    const llmResponse = (await c.env.AI.run("@cf/meta/llama-3.1-8b-instruct", {
+      messages: [
+        { role: "system", content: systemInstruction },
+        { role: "user", content: userQuery },
+      ],
+      max_tokens: 512,
+    })) as { response: string };
+
+    // 7️⃣ Return RAG response
+    return c.json({
+      query: userQuery,
+      context_chunks: searchResults.matches.map((m) => ({ text: m.metadata.text, score: m.score })),
+      final_answer: llmResponse.response?.trim() ?? "",
+    });
+  } catch (err) {
+    console.error("RAG endpoint error:", err);
+    return c.json({ error: "Internal server error" }, 500);
+  }
 });
+
+
+
+// Temporary debug endpoint for embeddings
+// app.post("/rag-debug", async (c) => {
+//   try {
+//     const body = await c.req.json<{ question?: string }>();
+//     const userQuery = body.question?.trim();
+
+//     if (!userQuery) {
+//       return c.json({ error: "Missing 'question' in request body" }, 400);
+//     }
+
+//     // Call the embedding model
+//     const embeddingRaw = await c.env.AI.run("@cf/baai/bge-base-en-v1.5", { text: userQuery });
+
+//     // Return the raw response for inspection
+//     return c.json({
+//       query: userQuery,
+//       embeddingRaw,
+//     });
+//   } catch (err) {
+//     return c.json({
+//       error: "Failed to call embedding model",
+//       details: String(err),
+//     }, 500);
+//   }
+// });
+
 
 export default app;

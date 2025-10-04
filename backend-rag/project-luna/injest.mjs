@@ -5,8 +5,8 @@ import { json, text } from "node:stream/consumers";
 
 configDotenv();
 
-const CLOUDFLARE_ACCOUNT_ID = process.env.CF_ACCOUNT_ID;
-const CLOUDFLARE_API_TOKEN = process.env.CF_API_TOKEN;
+const CLOUDFLARE_ACCOUNT_ID = process.env.CLOUDFLARE_ACCOUNT_ID;
+const CLOUDFLARE_API_TOKEN = process.env.CLOUDFLARE_API_TOKEN;
 const VECTORIZE_INDEX_NAME='vector-index'
 const EMBEDDING_MODEL='@cf/baai/bge-base-en-v1.5'
 const CSV_FILE_PATH='./articles.csv'
@@ -60,32 +60,43 @@ async function getEmbeddings(texts) {
 }
 
 async function insertVectors(vectors) {
-    const url = `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/vectorize/indexes/${VECTORIZE_INDEX_NAME}/upsert`;
-
     try {
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${CLOUDFLARE_API_TOKEN}`,
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(vectors),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text();
-            throw new Error(`Vectorize Upsert failed: ${response.statusText}. Body: ${errorBody}`);
+      const response = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/vectorize/v2/indexes/${VECTORIZE_INDEX_NAME}/upsert`,
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            namespace: "default", // optional, but recommended
+            vectors: vectors.map(v => ({
+              id: v.id,
+              values: v.values,
+              metadata: v.metadata,
+            })),
+          }),
         }
-
-        const result = await response.json();
-        return result;
+      );
+  
+      const data = await response.json();
+  
+      if (!response.ok) {
+        throw new Error(
+          `Vectorize Upsert failed: ${
+            data.errors ? JSON.stringify(data.errors) : data.message
+          }`
+        );
+      }
+  
+      console.log("✅ Inserted vectors successfully:", data);
+      return data.result;
     } catch (error) {
-        console.error("Error inserting vectors:", error);
-        return null;
-            
-        }
-    
-}
+      console.error("❌ Error inserting vectors:", error);
+    }
+  }
+  
 
 async function main() {
     if (!CLOUDFLARE_ACCOUNT_ID || !CLOUDFLARE_API_TOKEN) {
@@ -108,6 +119,11 @@ async function main() {
         console.log(`2. Generating embeddings for batch ${i / BATCH_SIZE + 1} (${batch.length} items)...`);
         const embeddings = await getEmbeddings(batchTexts);
 
+        if (embeddings.length === 0) {
+            console.error(`   - FATAL ERROR: Skipping remainder due to failed embeddings in batch ${i}. Check logs for details.`);
+            break; 
+        }
+
         if (embeddings.length !== batch.length) {
             console.warn(`   - Warning: Embedding count mismatch in batch ${i}. Skipping batch.`);
             continue;
@@ -124,15 +140,21 @@ async function main() {
         console.log(`   - Batch ${i / BATCH_SIZE + 1} completed.`);
     }
 
+    if (vectorsToUpsert.length === 0) {
+        console.error("❌ Cannot proceed with upsert: No vectors were generated successfully.");
+        return;
+    }
+
     // 4. Perform the final bulk upsert to Vectorize
     console.log(`3. Upserting ${vectorsToUpsert.length} total vectors to Vectorize...`);
     const upsertResult = await insertVectors(vectorsToUpsert);
 
-    if (upsertResult?.count) {
-        console.log(`✅ Success! Inserted/updated ${upsertResult.count} vectors.`);
-    } else {
-        console.log("❌ Final upsert failed.");
-    }
+if (upsertResult && upsertResult.mutationId) {
+  console.log(`✅ Success! Mutation ID: ${upsertResult.mutationId}`);
+} else {
+  console.error("❌ Final upsert failed. Response:", upsertResult);
+}
+
 }
 
 main().catch(console.error);
