@@ -136,3 +136,20 @@ async function main() {
 }
 
 main().catch(console.error);
+
+// Error inserting vectors: Error: Vectorize Upsert failed: Bad Request. Body: {
+//     "result": null,
+//     "success": false,
+//     "errors": [
+//       {
+//         "code": 1005,
+//         "message": "vectorize.unknown_content_type"
+//       }
+//     ],
+//     "messages": []
+//   }
+  
+//       at insertVectors (file:///Users/rasulmohammad/Desktop/personal_projects/project_luna/backend-rag/project-luna/injest.mjs:77:19)
+//       at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+//       at async main (file:///Users/rasulmohammad/Desktop/personal_projects/project_luna/backend-rag/project-luna/injest.mjs:129:26)
+//   ❌ Final upsert failed.
