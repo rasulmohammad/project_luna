@@ -18,14 +18,22 @@ async function loadCsv(filePath) {
     return new Promise((resolve, reject) => {
         const stream = parse()
         .on('data', (row) => {
+            // console.log("This is the row:", row)
             const chunkText = Object.entries(row)
             .map(([key, value]) => `${key}: ${value}`)
             .join(' | ');
 
-            data.push( {
+            // console.log(chunkText)
+             data.push( {
                 text: chunkText,
-                metadata: row,
+                metadata: {
+                  Title: row.Title,
+                  Link: row.Link,
+                  text: row.text.slice(0, 1000)
+                },
             });
+
+            // console.log("Latest entry to data: ", data[data.length - 1]);
         })
         .on('end', () => resolve(data))
         .on('error', reject);
